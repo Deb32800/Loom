@@ -50,3 +50,16 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+
+# ──────────────────────────────────────────────
+# LaTeX / PDF (personal learning docs)
+# ──────────────────────────────────────────────
+*.tex
+*.pdf
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
