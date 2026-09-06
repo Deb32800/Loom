@@ -42,7 +42,7 @@ from typing import Union
 #   - Clean and readable
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) # frozen=True makes the object immutable immutable means that its state cannot be changed after creation
 class Insert:
     """Insert text at a specific position in the document.
     
