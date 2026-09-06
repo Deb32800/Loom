@@ -1,6 +1,6 @@
 # 🧵 Loom
 
-**Real-time collaborative document editor** — built from scratch to deeply understand how Google Docs works under the hood.
+**Real-time collaborative document editor** 
 
 > "Weaving edits together, in real time."
 
