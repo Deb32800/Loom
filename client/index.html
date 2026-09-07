@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Loom — Collaborative Editor</title>
+    <meta name="description" content="Real-time collaborative document editor built with Operational Transformation">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/editor.css">
+</head>
+<body>
+    <!-- Top bar -->
+    <header id="header">
+        <div class="header-left">
+            <h1 class="logo">Loom</h1>
+            <span class="separator">|</span>
+            <span id="doc-title" class="doc-title">Untitled Document</span>
+        </div>
+        <div class="header-right">
+            <div id="connection-status" class="status disconnected">
+                <span class="status-dot"></span>
+                <span class="status-text">Disconnected</span>
+            </div>
+            <div id="user-count" class="user-count" title="Connected users">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span id="user-count-text">0</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Editor area -->
+    <main id="editor-container">
+        <div id="editor-wrapper">
+            <textarea id="editor" 
+                      placeholder="Start typing... Open another tab to collaborate in real-time."
+                      spellcheck="true"
+                      autofocus></textarea>
+        </div>
+    </main>
+
+    <!-- Info bar at bottom -->
+    <footer id="footer">
+        <div class="footer-left">
+            <span id="revision-display">Rev: 0</span>
+            <span class="separator">|</span>
+            <span id="char-count">0 chars</span>
+        </div>
+        <div class="footer-right">
+            <span id="client-id-display"></span>
+        </div>
+    </footer>
+
+    <!-- Remote cursor labels (injected dynamically) -->
+    <div id="remote-cursors-container"></div>
+
+    <script src="/static/js/ot_client.js"></script>
+    <script src="/static/js/websocket.js"></script>
+    <script src="/static/js/editor.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

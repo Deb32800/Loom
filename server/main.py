@@ -50,8 +50,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from server.ot_engine import Insert, Delete, NoOp
-from server.document import Document
+from server.document import Document, OperationEntry
 from server.session_manager import SessionManager
+from server.database import Database
 
 # ── Logging setup ─────────────────────────────────────────────
 logging.basicConfig(
@@ -68,9 +69,52 @@ app = FastAPI(title="Loom", description="Real-time collaborative document editor
 # These are module-level singletons. In a production system you'd
 # use dependency injection, but for an MVP this is clear and simple.
 #
-# One document, one session manager. All connected clients share these.
+# One document, one session manager, one database.
 document = Document(content="", document_id="main")
 session_manager = SessionManager()
+db = Database()
+
+
+# ── Lifecycle events ──────────────────────────────────────────
+# startup:  load saved document from database when server starts
+# shutdown: save final document state and close database connection
+
+@app.on_event("startup")
+async def on_startup():
+    """Called once when the server starts. Loads document from database."""
+    await db.initialize()
+    
+    saved = await db.load_document(document.document_id)
+    if saved:
+        content, revision = saved
+        document.content = content
+        document.revision = revision
+        
+        # Rebuild the in-memory operation history from the database
+        ops = await db.load_operations(document.document_id)
+        for op_data in ops:
+            document.history.append(OperationEntry(
+                op=op_data["op"],
+                revision=op_data["revision"],
+                client_id=op_data["client_id"]
+            ))
+        
+        logger.info(
+            f"Loaded document: {len(content)} chars, "
+            f"revision {revision}, {len(ops)} operations in history"
+        )
+    else:
+        logger.info("No saved document found, starting fresh")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    """Called once when the server stops. Saves document and closes database."""
+    await db.save_document(
+        document.document_id, document.content, document.revision
+    )
+    await db.close()
+    logger.info("Server shutdown complete, document saved")
 
 
 # ── Helper: Parse an operation from JSON ──────────────────────
@@ -266,6 +310,14 @@ async def _handle_operation(client_id: str, data: dict) -> None:
                 "client_id": client_id
             },
             exclude_client=client_id
+        )
+
+        # Persist to database
+        await db.save_operation(
+            document.document_id, result.op, result.revision, client_id
+        )
+        await db.save_document(
+            document.document_id, document.content, document.revision
         )
 
         logger.info(
