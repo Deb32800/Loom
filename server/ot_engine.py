@@ -312,6 +312,8 @@ def _transform_insert_delete(ins: Insert, dlt: Delete) -> tuple[Insert, Delete]:
           After transform:
             ins' = Insert(1, "X")     — unchanged
             dlt' = Delete(4, 2)       — shifted right by len("X")=1
+            in easy words - the inserted text is inserted first and 
+            the delete operation is shifted right by the length of the inserted text
     
     Sub-case 2b: Insert is AFTER the delete region
         ins.pos >= dlt.pos + dlt.count
