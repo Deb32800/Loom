@@ -57,7 +57,7 @@ class OperationEntry:
                     BEFORE this op was at revision 4.
         client_id:  Which client sent this operation.
     """
-    op: Union[Operation, NoOp]
+    op: Union[Operation, NoOp] #Union is a way to say that an attribute can be of multiple types eg - it can be an Operation or a NoOp
     revision: int
     client_id: str
 
