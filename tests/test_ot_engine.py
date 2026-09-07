@@ -223,16 +223,13 @@ class TestTransformInsertInsert:
         assert path1 == path2
 
 
-# ═══════════════════════════════════════════════════════════════
-# TEST GROUP 4: Transform — Insert vs Delete
-# ═══════════════════════════════════════════════════════════════
 
 
 class TestTransformInsertDelete:
     """Test transform when one op is Insert and the other is Delete."""
 
     def test_insert_before_delete(self):
-        """Insert is before the delete region."""
+        
         ins = Insert(1, "X")
         dlt = Delete(3, 2)
         ins_prime, dlt_prime = transform(ins, dlt)
@@ -241,7 +238,7 @@ class TestTransformInsertDelete:
         assert dlt_prime == Delete(4, 2)             # shifted right by 1
 
     def test_insert_after_delete(self):
-        """Insert is after the delete region."""
+       
         ins = Insert(5, "X")
         dlt = Delete(1, 2)
         ins_prime, dlt_prime = transform(ins, dlt)
@@ -250,7 +247,7 @@ class TestTransformInsertDelete:
         assert dlt_prime == Delete(1, 2)             # unchanged
 
     def test_insert_inside_delete(self):
-        """Insert falls inside the delete range — THE TRICKY CASE."""
+        
         ins = Insert(3, "XY")
         dlt = Delete(2, 4)
         ins_prime, dlt_prime = transform(ins, dlt)

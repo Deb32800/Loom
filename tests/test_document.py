@@ -109,8 +109,7 @@ class TestDocumentTransform:
         # But since A inserted "X" at 0, B's position needs to shift to 6
         result = doc.receive_operation(
             Insert(5, "!"), client_revision=0, client_id="b"
-        )
-        # The transform should have shifted B's insert from pos 5 → pos 6
+        ) 
         assert doc.content == "XHello!"
         assert doc.revision == 2
 
@@ -122,19 +121,11 @@ class TestDocumentTransform:
         doc.receive_operation(
             Insert(0, "X"), client_revision=0, client_id="a"
         )
-        # Server: "XABCDE", rev 1
-
-        # Revision 2: User A inserts "Y" at start
+        
         doc.receive_operation(
             Insert(0, "Y"), client_revision=1, client_id="a"
         )
-        # Server: "YXABCDE", rev 2
-
-        # User B was at revision 0 and inserts at position 3
-        # Their view was "ABCDE" and they want "ABC_DE"
-        # After transforms:
-        #   vs op1 (Insert(0,"X")): pos 3 → 4
-        #   vs op2 (Insert(0,"Y")): pos 4 → 5
+        
         result = doc.receive_operation(
             Insert(3, "_"), client_revision=0, client_id="b"
         )
@@ -149,10 +140,7 @@ class TestDocumentTransform:
         doc.receive_operation(
             Insert(3, "X"), client_revision=0, client_id="a"
         )
-        # Server: "HelXlo", rev 1
-
-        # User B also inserts at position 3 (based on rev 0)
-        # After transform: A wins (convention), so B shifts right
+        
         doc.receive_operation(
             Insert(3, "Y"), client_revision=0, client_id="b"
         )
@@ -169,10 +157,7 @@ class TestDocumentTransform:
         doc.receive_operation(
             Delete(1, 2), client_revision=0, client_id="a"
         )
-        # Server: "ADE", rev 1
-
-        # User B (at rev 0) inserts "X" at position 4
-        # After transform vs Delete(1,2): pos 4 → pos 2
+        
         doc.receive_operation(
             Insert(4, "X"), client_revision=0, client_id="b"
         )
@@ -187,10 +172,7 @@ class TestDocumentTransform:
         doc.receive_operation(
             Delete(0, 2), client_revision=0, client_id="a"
         )
-        # Server: "CDEFGH", rev 1
-
-        # User B (at rev 0) deletes "GH" (positions 6-7)
-        # After transform vs Delete(0,2): pos 6 → pos 4
+        
         doc.receive_operation(
             Delete(6, 2), client_revision=0, client_id="b"
         )
@@ -205,11 +187,7 @@ class TestDocumentTransform:
         doc.receive_operation(
             Delete(2, 4), client_revision=0, client_id="a"
         )
-        # Server: "ABGH", rev 1
-
-        # User B (at rev 0) deletes positions 4-7 ("EFGH")
-        # Overlap with A: positions 4-5 ("EF")
-        # After transform: B only needs to delete "GH" (the non-overlapping part)
+        
         doc.receive_operation(
             Delete(4, 4), client_revision=0, client_id="b"
         )
