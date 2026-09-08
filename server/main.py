@@ -43,6 +43,7 @@ MESSAGE TYPES (our protocol):
 from __future__ import annotations
 import logging
 import uuid
+import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -56,6 +57,27 @@ app = FastAPI(title='Loom', description='Real-time collaborative document editor
 document = Document(content='', document_id='main')
 session_manager = SessionManager()
 db = Database()
+
+# Background task for batching DB writes
+db_flush_task = None
+pending_db_ops = []
+
+async def db_flush_loop():
+    """Periodically flush operations and document state to the database."""
+    while True:
+        await asyncio.sleep(2.0)
+        try:
+            if pending_db_ops:
+                ops_to_flush = pending_db_ops[:]
+                pending_db_ops.clear()
+                for op_args in ops_to_flush:
+                    await db.save_operation(*op_args)
+                await db.save_document(document.document_id, document.content, document.revision)
+                logger.debug(f"Flushed {len(ops_to_flush)} operations to DB")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in DB flush loop: {e}")
 
 @app.on_event('startup')
 async def on_startup():
@@ -72,10 +94,21 @@ async def on_startup():
         logger.info(f'Loaded document: {len(content)} chars, revision {revision}, {len(ops)} operations in history')
     else:
         logger.info('No saved document found, starting fresh')
+        
+    global db_flush_task
+    db_flush_task = asyncio.create_task(db_flush_loop())
 
 @app.on_event('shutdown')
 async def on_shutdown():
     """Called once when the server stops. Saves document and closes database."""
+    if db_flush_task:
+        db_flush_task.cancel()
+    
+    # Flush remaining operations
+    if pending_db_ops:
+        for op_args in pending_db_ops:
+            await db.save_operation(*op_args)
+            
     await db.save_document(document.document_id, document.content, document.revision)
     await db.close()
     logger.info('Server shutdown complete, document saved')
@@ -184,8 +217,10 @@ async def _handle_operation(client_id: str, data: dict) -> None:
             return
         await session_manager.send_to(client_id, {'type': 'ack', 'revision': result.revision})
         await session_manager.broadcast({'type': 'operation', 'op': serialize_operation(result.op), 'revision': result.revision, 'client_id': client_id}, exclude_client=client_id)
-        await db.save_operation(document.document_id, result.op, result.revision, client_id)
-        await db.save_document(document.document_id, document.content, document.revision)
+        
+        # Batch DB saves
+        pending_db_ops.append((document.document_id, result.op, result.revision, client_id))
+        
         logger.info(f'Op from {client_id}: {serialize_operation(result.op)} -> rev {result.revision}')
     except (ValueError, KeyError) as e:
         logger.error(f'Invalid operation from {client_id}: {e}')
