@@ -70,6 +70,8 @@ class Document:
         # and the new revision number — broadcast this to all clients
     """
 
+    MAX_HISTORY = 1000
+
     def __init__(self, content: str='', document_id: str='default'):
         """Initialize a new document.
         
@@ -79,6 +81,7 @@ class Document:
         """
         self.content: str = content
         self.revision: int = 0
+        self.base_revision: int = 0  # The revision number before the oldest operation in history
         self.history: list[OperationEntry] = []
         self.document_id: str = document_id
 
@@ -127,23 +130,38 @@ class Document:
             raise ValueError(f'client_revision must be >= 0, got {client_revision}')
         if client_revision > self.revision:
             raise ValueError(f"client_revision {client_revision} is ahead of server revision {self.revision}. This shouldn't happen — the client thinks it's in the future!")
+        if client_revision < self.base_revision:
+            raise ValueError(f"client_revision {client_revision} is too old (server base is {self.base_revision}). Client must resync.")
+
         if isinstance(op, NoOp):
             return None
+            
         if client_revision < self.revision:
-            missed_ops = self.history[client_revision:]
+            missed_ops = self.history[client_revision - self.base_revision:]
             for entry in missed_ops:
                 if isinstance(entry.op, NoOp):
                     continue
                 (op, _) = transform(op, entry.op)
                 if isinstance(op, NoOp):
                     return None
+                    
         try:
             self.content = apply(self.content, op)
         except ValueError as e:
             raise ValueError(f'Failed to apply operation after transform: {e}. Op: {op}, Document length: {len(self.content)}, Revision: {self.revision}')
+            
         self.revision += 1
         entry = OperationEntry(op=op, revision=self.revision, client_id=client_id)
         self.history.append(entry)
+        
+        # Prune history if it gets too large
+        if len(self.history) > self.MAX_HISTORY:
+            # Keep the most recent half of the history
+            keep = self.MAX_HISTORY // 2
+            pruned_count = len(self.history) - keep
+            self.history = self.history[-keep:]
+            self.base_revision += pruned_count
+            
         return entry
 
     def get_state(self) -> dict:
