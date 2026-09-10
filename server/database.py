@@ -63,6 +63,13 @@ class Database:
         """Save (upsert) the current document state.
 
         Called periodically or after each operation to persist the latest state.
+
+        Note: the insert-if-missing branch only fills in content/revision.
+        Since documents gained a required owner_id (server/documents.py),
+        it only works for a document_id that already exists — which is the
+        only way DocumentRegistry ever calls this in practice, since it
+        never activates a document that wasn't already created via the
+        documents API. Don't use this to create a new document.
         """
         async with self._session_factory() as session:
             doc = await session.get(DocumentModel, document_id)

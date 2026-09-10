@@ -33,8 +33,45 @@
         </div>
     </div>
 
+    <div id="dashboard-screen" class="dashboard-screen hidden">
+        <header class="dashboard-header">
+            <h1 class="logo">Loom</h1>
+            <div class="header-right">
+                <span id="dashboard-username" class="current-username"></span>
+                <button id="dashboard-logout-btn" class="logout-btn">Log out</button>
+            </div>
+        </header>
+        <main class="dashboard-main">
+            <form id="create-document-form" class="create-document-form">
+                <input type="text" id="new-document-title" placeholder="New document title">
+                <button type="submit">+ New Document</button>
+            </form>
+            <p class="dashboard-error" id="dashboard-error"></p>
+            <div id="documents-list" class="documents-list"></div>
+        </main>
+    </div>
+
+    <div id="share-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <h2 id="share-modal-title">Share document</h2>
+            <form id="share-form" class="auth-form">
+                <input type="text" id="share-username" placeholder="Username" required>
+                <select id="share-role">
+                    <option value="editor">Can edit</option>
+                    <option value="viewer">Can view</option>
+                </select>
+                <button type="submit">Share</button>
+                <p class="auth-error" id="share-error"></p>
+            </form>
+            <div id="share-members-list" class="share-members-list"></div>
+            <button id="share-modal-close" class="close-btn">Close</button>
+        </div>
+    </div>
+
     <header id="header" class="hidden">
         <div class="header-left">
+            <a href="#" id="back-to-dashboard" class="back-link">&larr; Documents</a>
+            <span class="separator">|</span>
             <h1 class="logo">Loom</h1>
             <span class="separator">|</span>
             <span id="doc-title" class="doc-title">Untitled Document</span>
@@ -81,6 +118,7 @@
     <div id="remote-cursors-container"></div>
 
     <script src="/static/js/auth.js"></script>
+    <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/ot_transform.js"></script>
     <script src="/static/js/ot_client.js"></script>
     <script src="/static/js/websocket.js"></script>

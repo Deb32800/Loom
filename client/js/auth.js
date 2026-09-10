@@ -40,8 +40,8 @@ class LoomAuth {
         }
     }
 
-    async fetchWsTicket() {
-        const res = await fetch("/api/auth/ws-ticket", {
+    async fetchWsTicket(documentId) {
+        const res = await fetch(`/api/documents/${documentId}/ws-ticket`, {
             method: "POST",
             headers: { Authorization: `Bearer ${this.accessToken}` },
         });

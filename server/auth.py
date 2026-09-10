@@ -114,20 +114,27 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
 # ---------------------------------------------------------------------------
 
 class _TicketInfo:
-    __slots__ = ('user_id', 'username', 'expires_at')
+    __slots__ = ('user_id', 'username', 'document_id', 'role', 'title', 'expires_at')
 
-    def __init__(self, user_id: str, username: str, expires_at: datetime):
+    def __init__(self, user_id: str, username: str, document_id: str, role: str, title: str, expires_at: datetime):
         self.user_id = user_id
         self.username = username
+        self.document_id = document_id
+        self.role = role
+        self.title = title
         self.expires_at = expires_at
 
 
 _ws_tickets: dict = {}
 
 
-def issue_ws_ticket(user_id: str, username: str) -> str:
+def issue_ws_ticket(user_id: str, username: str, document_id: str, role: str, title: str) -> str:
+    """Issue a single-use ticket bound to one user, one document, and the
+    role they're allowed to act with on it. The WS endpoint derives its
+    document_id and permissions from this ticket rather than trusting
+    anything the client sends directly."""
     ticket = secrets.token_urlsafe(24)
-    _ws_tickets[ticket] = _TicketInfo(user_id, username, datetime.now(timezone.utc) + WS_TICKET_TTL)
+    _ws_tickets[ticket] = _TicketInfo(user_id, username, document_id, role, title, datetime.now(timezone.utc) + WS_TICKET_TTL)
     return ticket
 
 
@@ -284,7 +291,7 @@ async def me(user: UserModel = Depends(get_current_user)):
     return UserResponse(user_id=user.id, username=user.username)
 
 
-@auth_router.post('/ws-ticket', response_model=WsTicketResponse)
-async def ws_ticket(user: UserModel = Depends(get_current_user)):
-    ticket = issue_ws_ticket(user.id, user.username)
-    return WsTicketResponse(ticket=ticket)
+# WebSocket tickets are now issued per-document (a connection is only ever
+# for one document, and the ticket needs to carry that document's id and the
+# caller's role on it) — see POST /api/documents/{document_id}/ws-ticket in
+# server/documents.py, which checks membership before calling issue_ws_ticket.

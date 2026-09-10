@@ -17,8 +17,11 @@ class LoomWebSocket {
         this.onPresence = null;
         this.onStatusChange = null;
         this.onError = null;
+        this.onDocumentDeleted = null;
+        this._intentionalDisconnect = false;
     }
     async connect() {
+        this._intentionalDisconnect = false;
         this._updateStatus("connecting");
         let ticket;
         try {
@@ -46,7 +49,9 @@ class LoomWebSocket {
                 this.isConnected = false;
                 this._updateStatus("disconnected");
                 console.log("[WS] Disconnected, code:", event.code);
-                this._scheduleReconnect();
+                if (!this._intentionalDisconnect) {
+                    this._scheduleReconnect();
+                }
             };
             this.ws.onerror = (error) => {
                 console.error("[WS] Error:", error);
@@ -55,6 +60,14 @@ class LoomWebSocket {
             console.error("[WS] Failed to create WebSocket:", e);
             this._scheduleReconnect();
         }
+    }
+    disconnect() {
+        this._intentionalDisconnect = true;
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+        if (this.ws) this.ws.close();
     }
     send(message) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -90,6 +103,10 @@ class LoomWebSocket {
                 break;
             case "presence":
                 if (this.onPresence) this.onPresence(data);
+                break;
+            case "document_deleted":
+                this._intentionalDisconnect = true;
+                if (this.onDocumentDeleted) this.onDocumentDeleted();
                 break;
             case "error":
                 console.error("[WS] Server error:", data.message);

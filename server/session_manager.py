@@ -1,118 +1,96 @@
 """
-Loom Session Manager — Tracking Connected Clients
-===================================================
+Loom Session Manager — Tracking Connected Clients Per Document
+=================================================================
 
-This module manages WebSocket connections. It knows:
-    - Which clients are currently connected
-    - Each client's WebSocket object (so we can send them messages)
-    - Each client's cursor position (for showing remote cursors)
+This module manages WebSocket connections, scoped per document: it knows
+which clients are connected to which document, each client's WebSocket
+object (so we can send them messages), each client's cursor position, and
+each client's role on that document (owner/editor/viewer — viewer is
+read-only, enforced by the caller before an operation is applied).
 
-It does NOT handle OT or document state — that's the Document Manager's job.
-This module is purely about connection management and message broadcasting.
-
-WHY SEPARATE THIS FROM THE MAIN SERVER?
-    Separation of concerns. The WebSocket endpoint in main.py handles
-    message parsing and routing. This module handles "who is connected"
-    and "how do I send a message to everyone." Keeping them separate
-    makes both easier to understand and test.
+It does NOT handle OT or document state — that's the Document/DocumentRegistry's
+job. This module is purely connection management and message broadcasting,
+scoped so that edits/cursors/presence in one document never leak into another.
 """
 from __future__ import annotations
-import json
 import logging
 from typing import Dict, Optional
 from fastapi import WebSocket
 logger = logging.getLogger('loom.session')
 
 class ClientInfo:
-    """Information about a single connected client.
-    
+    """Information about a single connected client within one document.
+
     Attributes:
-        client_id:  Unique identifier for this client (e.g. "user_abc").
+        client_id:  Unique identifier for this connection (e.g. "alice-be6aed").
         websocket:  The WebSocket connection object.
         cursor_pos: The client's last known cursor position in the document.
         color:      A color assigned to this client for their remote cursor.
+        role:       This client's access role on the document ('owner' /
+                    'editor' / 'viewer').
     """
     CURSOR_COLORS = ['#E74C3C', '#3498DB', '#2ECC71', '#F39C12', '#9B59B6', '#1ABC9C', '#E67E22', '#E91E63']
     _color_index = 0
 
-    def __init__(self, client_id: str, websocket: WebSocket):
+    def __init__(self, client_id: str, websocket: WebSocket, role: str):
         self.client_id = client_id
         self.websocket = websocket
+        self.role = role
         self.cursor_pos: int = 0
         self.color = ClientInfo.CURSOR_COLORS[ClientInfo._color_index % len(ClientInfo.CURSOR_COLORS)]
         ClientInfo._color_index += 1
 
 class SessionManager:
-    """Manages all connected WebSocket clients.
-    
-    This is the "phonebook" of the server — it knows who's connected
-    and how to reach them.
-    
+    """Manages all connected WebSocket clients, grouped by document_id.
+
     Usage:
         manager = SessionManager()
-        
-        # When a client connects
-        await manager.connect(client_id, websocket)
-        
-        # Send a message to everyone except the sender
-        await manager.broadcast(message_dict, exclude_client="user_abc")
-        
-        # When a client disconnects
-        manager.disconnect(client_id)
+        await manager.connect(document_id, client_id, websocket, role="editor")
+        await manager.broadcast(document_id, message_dict, exclude_client="alice-be6aed")
+        manager.disconnect(document_id, client_id)
     """
 
     def __init__(self):
-        self._clients: Dict[str, ClientInfo] = {}
+        self._documents: Dict[str, Dict[str, ClientInfo]] = {}
 
-    async def connect(self, client_id: str, websocket: WebSocket) -> ClientInfo:
-        """Register a new client connection.
-        
-        This accepts the WebSocket handshake and stores the client info.
-        
-        Args:
-            client_id: Unique identifier for this client.
-            websocket: The WebSocket connection from FastAPI.
-        
-        Returns:
-            ClientInfo for the newly connected client.
-        """
+    def _clients(self, document_id: str) -> Dict[str, ClientInfo]:
+        return self._documents.setdefault(document_id, {})
+
+    async def connect(self, document_id: str, client_id: str, websocket: WebSocket, role: str) -> ClientInfo:
+        """Register a new client connection to a document. Accepts the
+        WebSocket handshake and stores the client info."""
         await websocket.accept()
-        client = ClientInfo(client_id, websocket)
-        self._clients[client_id] = client
-        logger.info(f'Client connected: {client_id} (color: {client.color}, total: {len(self._clients)})')
+        client = ClientInfo(client_id, websocket, role)
+        self._clients(document_id)[client_id] = client
+        logger.info(f'Client connected: {client_id} to document {document_id} as {role} (total in doc: {len(self._clients(document_id))})')
         return client
 
-    def disconnect(self, client_id: str) -> None:
-        """Remove a client from the session.
-        
-        Called when a WebSocket connection closes (user closes tab,
-        network drops, etc.)
-        
-        Args:
-            client_id: The client to remove.
-        """
-        if client_id in self._clients:
-            del self._clients[client_id]
-            logger.info(f'Client disconnected: {client_id} (remaining: {len(self._clients)})')
+    def disconnect(self, document_id: str, client_id: str) -> None:
+        """Remove a client from a document's session. Called when a WebSocket
+        connection closes."""
+        clients = self._documents.get(document_id)
+        if clients and client_id in clients:
+            del clients[client_id]
+            logger.info(f'Client disconnected: {client_id} from document {document_id} (remaining: {len(clients)})')
+            if not clients:
+                del self._documents[document_id]
 
-    async def broadcast(self, message: dict, exclude_client: Optional[str]=None) -> None:
-        """Send a JSON message to all connected clients.
-        
-        Args:
-            message:        The message dict to send (will be JSON-serialized).
-            exclude_client: If set, don't send to this client.
-                           Used when broadcasting an operation — we don't
-                           send a client's own operation back to them.
-                           Instead, they get an 'ack' message.
-        
+    def get_client(self, document_id: str, client_id: str) -> Optional[ClientInfo]:
+        clients = self._documents.get(document_id)
+        return clients.get(client_id) if clients else None
+
+    async def broadcast(self, document_id: str, message: dict, exclude_client: Optional[str]=None) -> None:
+        """Send a JSON message to all clients connected to this document.
+
         Why exclude the sender?
-            When User A sends an edit, we broadcast it to Users B and C.
-            But User A already applied the edit locally (optimistic update).
-            Sending it back to A would cause a duplicate application.
-            Instead, A gets an 'ack' confirming the server accepted it.
+            When User A sends an edit, we broadcast it to everyone else on the
+            same document. User A already applied the edit locally
+            (optimistic update); sending it back would cause a duplicate
+            application. Instead, A gets an 'ack'.
         """
+        clients = self._documents.get(document_id, {})
         disconnected = []
-        for (client_id, client) in self._clients.items():
+        for (client_id, client) in clients.items():
             if client_id == exclude_client:
                 continue
             try:
@@ -121,55 +99,44 @@ class SessionManager:
                 logger.warning(f'Failed to send to {client_id}, marking for disconnect')
                 disconnected.append(client_id)
         for client_id in disconnected:
-            self.disconnect(client_id)
+            self.disconnect(document_id, client_id)
 
-    async def send_to(self, client_id: str, message: dict) -> None:
-        """Send a JSON message to a specific client.
-        
-        Used for:
-            - Sending the initial document state when a client connects
-            - Sending 'ack' messages back to the operation sender
-        
-        Args:
-            client_id: The client to send to.
-            message:   The message dict to send.
-        """
-        client = self._clients.get(client_id)
+    async def send_to(self, document_id: str, client_id: str, message: dict) -> None:
+        """Send a JSON message to a specific client on a specific document."""
+        client = self.get_client(document_id, client_id)
         if client is None:
-            logger.warning(f'Tried to send to unknown client: {client_id}')
+            logger.warning(f'Tried to send to unknown client: {client_id} on document {document_id}')
             return
         try:
             await client.websocket.send_json(message)
         except Exception:
             logger.warning(f'Failed to send to {client_id}, disconnecting')
-            self.disconnect(client_id)
+            self.disconnect(document_id, client_id)
 
-    def update_cursor(self, client_id: str, position: int) -> None:
-        """Update a client's cursor position.
-        
-        Args:
-            client_id: The client whose cursor moved.
-            position:  New cursor position (character index in document).
-        """
-        client = self._clients.get(client_id)
+    def update_cursor(self, document_id: str, client_id: str, position: int) -> None:
+        """Update a client's cursor position."""
+        client = self.get_client(document_id, client_id)
         if client:
             client.cursor_pos = position
 
-    def get_client_list(self) -> list:
-        """Get a list of all connected clients and their info.
-        
+    def get_client_list(self, document_id: str) -> list:
+        """Get a list of all clients connected to a document and their info.
+
         Used to tell a newly connected client who else is in the session.
-        
-        Returns:
-            List of dicts with client_id, color, and cursor_pos.
         """
-        return [{'client_id': c.client_id, 'color': c.color, 'cursor_pos': c.cursor_pos} for c in self._clients.values()]
+        clients = self._documents.get(document_id, {})
+        return [{'client_id': c.client_id, 'color': c.color, 'cursor_pos': c.cursor_pos, 'role': c.role} for c in clients.values()]
+
+    def document_client_count(self, document_id: str) -> int:
+        """Number of clients currently connected to a specific document."""
+        return len(self._documents.get(document_id, {}))
 
     @property
-    def client_count(self) -> int:
-        """Number of currently connected clients."""
-        return len(self._clients)
+    def total_client_count(self) -> int:
+        """Number of clients currently connected across all documents."""
+        return sum(len(clients) for clients in self._documents.values())
 
-    def is_connected(self, client_id: str) -> bool:
-        """Check if a client is currently connected."""
-        return client_id in self._clients
+    def is_connected(self, document_id: str, client_id: str) -> bool:
+        """Check if a client is currently connected to a document."""
+        clients = self._documents.get(document_id)
+        return bool(clients and client_id in clients)
