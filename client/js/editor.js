@@ -44,10 +44,12 @@ class LoomEditor {
         this.textarea.addEventListener("input", () => {
             if (this._isRemoteUpdate) return;
             const newValue = this.textarea.value;
-            const op = this._computeDiff(this.previousValue, newValue);
+            const ops = this._computeDiff(this.previousValue, newValue);
             this.previousValue = newValue;
-            if (op && this.onLocalEdit) {
-                this.onLocalEdit(op);
+            if (this.onLocalEdit) {
+                for (const op of ops) {
+                    this.onLocalEdit(op);
+                }
             }
             this._updateCharCount();
         });
@@ -56,7 +58,7 @@ class LoomEditor {
         this.textarea.addEventListener("select", () => this._reportCursor());
     }
     _computeDiff(oldText, newText) {
-        if (oldText === newText) return null;
+        if (oldText === newText) return [];
         let start = 0;
         while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
             start++;
@@ -69,14 +71,17 @@ class LoomEditor {
         }
         const deletedCount = oldEnd - start;
         const insertedText = newText.slice(start, newEnd);
-        if (deletedCount > 0 && insertedText.length === 0) {
-            return { type: "delete", position: start, count: deletedCount };
-        } else if (deletedCount === 0 && insertedText.length > 0) {
-            return { type: "insert", position: start, text: insertedText };
-        } else if (deletedCount > 0 && insertedText.length > 0) {
-            return { type: "insert", position: start, text: insertedText };
+        const ops = [];
+        // Delete first, then insert at the same position — this mirrors what actually
+        // happened (the selected range was removed, then the new text was typed in its
+        // place) and keeps both ops meaningful on their own instead of losing the delete.
+        if (deletedCount > 0) {
+            ops.push({ type: "delete", position: start, count: deletedCount });
         }
-        return null;
+        if (insertedText.length > 0) {
+            ops.push({ type: "insert", position: start, text: insertedText });
+        }
+        return ops;
     }
     _reportCursor() {
         if (this.onCursorMove) {

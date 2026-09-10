@@ -18,7 +18,7 @@ class LoomWebSocket {
     connect(clientId) {
         this.clientId = clientId || "user_" + Math.random().toString(36).substr(2, 8);
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const url = `${protocol}
+        const url = `${protocol}//${window.location.host}/ws?client_id=${this.clientId}`;
         this._updateStatus("connecting");
         try {
             this.ws = new WebSocket(url);

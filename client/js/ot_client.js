@@ -50,16 +50,30 @@ class OTClient {
                     this.onApplyRemote(op);
                 }
                 break;
-            case "awaitingConfirm":
+            case "awaitingConfirm": {
+                // Our `pending` op hasn't been acked yet, so it's concurrent with `op`.
+                // Transform both against each other: pending is updated to account for
+                // `op`, and the transformed `op'` (not `op`) is what gets applied locally,
+                // since our local buffer already reflects `pending`.
+                const [pendingPrime, opPrime] = transform(this.pending, op);
+                this.pending = pendingPrime;
                 if (this.onApplyRemote) {
-                    this.onApplyRemote(op);
+                    this.onApplyRemote(opPrime);
                 }
                 break;
-            case "awaitingBuffer":
+            }
+            case "awaitingBuffer": {
+                // Both `pending` (in flight) and `buffer` (queued locally) are concurrent
+                // with `op`. Transform `op` through pending first, then through buffer.
+                const [pendingPrime, opPrime1] = transform(this.pending, op);
+                const [bufferPrime, opPrime2] = transform(this.buffer, opPrime1);
+                this.pending = pendingPrime;
+                this.buffer = bufferPrime;
                 if (this.onApplyRemote) {
-                    this.onApplyRemote(op);
+                    this.onApplyRemote(opPrime2);
                 }
                 break;
+            }
         }
     }
     reset(revision) {
