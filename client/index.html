@@ -10,7 +10,30 @@
     <link rel="stylesheet" href="/static/css/editor.css">
 </head>
 <body>
-    <header id="header">
+    <div id="auth-screen" class="auth-screen">
+        <div class="auth-card">
+            <h1 class="logo">Loom</h1>
+            <p class="auth-subtitle">Sign in to start editing</p>
+            <form id="login-form" class="auth-form">
+                <input type="text" id="login-username" placeholder="Username" autocomplete="username" required>
+                <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required>
+                <button type="submit">Log in</button>
+                <p class="auth-error" id="login-error"></p>
+            </form>
+            <form id="signup-form" class="auth-form hidden">
+                <input type="text" id="signup-username" placeholder="Username" autocomplete="username" required>
+                <input type="password" id="signup-password" placeholder="Password (min 8 characters)" autocomplete="new-password" required>
+                <button type="submit">Sign up</button>
+                <p class="auth-error" id="signup-error"></p>
+            </form>
+            <p class="auth-toggle">
+                <a href="#" id="show-signup">Need an account? Sign up</a>
+                <a href="#" id="show-login" class="hidden">Already have an account? Log in</a>
+            </p>
+        </div>
+    </div>
+
+    <header id="header" class="hidden">
         <div class="header-left">
             <h1 class="logo">Loom</h1>
             <span class="separator">|</span>
@@ -30,19 +53,21 @@
                 </svg>
                 <span id="user-count-text">0</span>
             </div>
+            <span id="current-username" class="current-username"></span>
+            <button id="logout-btn" class="logout-btn">Log out</button>
         </div>
     </header>
 
-    <main id="editor-container">
+    <main id="editor-container" class="hidden">
         <div id="editor-wrapper">
-            <textarea id="editor" 
+            <textarea id="editor"
                       placeholder="Start typing... Open another tab to collaborate in real-time."
                       spellcheck="true"
                       autofocus></textarea>
         </div>
     </main>
 
-    <footer id="footer">
+    <footer id="footer" class="hidden">
         <div class="footer-left">
             <span id="revision-display">Rev: 0</span>
             <span class="separator">|</span>
@@ -55,6 +80,7 @@
 
     <div id="remote-cursors-container"></div>
 
+    <script src="/static/js/auth.js"></script>
     <script src="/static/js/ot_transform.js"></script>
     <script src="/static/js/ot_client.js"></script>
     <script src="/static/js/websocket.js"></script>

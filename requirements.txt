@@ -11,6 +11,10 @@ sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 alembic==1.14.0
 
+# Auth (JWT access tokens, argon2id password hashing)
+pyjwt==2.10.1
+argon2-cffi==23.1.0
+
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0

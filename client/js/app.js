@@ -1,7 +1,9 @@
 document.addEventListener("DOMContentLoaded", () => {
+    const auth = new LoomAuth();
     const otClient = new OTClient();
-    const ws = new LoomWebSocket();
+    const ws = new LoomWebSocket(() => auth.fetchWsTicket());
     const editor = new LoomEditor("editor");
+
     const revisionDisplay = document.getElementById("revision-display");
     const clientIdDisplay = document.getElementById("client-id-display");
     const userCountDisplay = document.getElementById("user-count-text");
@@ -9,6 +11,21 @@ document.addEventListener("DOMContentLoaded", () => {
     const statusText = statusEl.querySelector(".status-text");
     const remoteCursorsContainer = document.getElementById("remote-cursors-container");
     const activeCursors = {};
+
+    const authScreen = document.getElementById("auth-screen");
+    const header = document.getElementById("header");
+    const editorContainer = document.getElementById("editor-container");
+    const footer = document.getElementById("footer");
+    const currentUsernameDisplay = document.getElementById("current-username");
+    const logoutBtn = document.getElementById("logout-btn");
+
+    const loginForm = document.getElementById("login-form");
+    const signupForm = document.getElementById("signup-form");
+    const loginError = document.getElementById("login-error");
+    const signupError = document.getElementById("signup-error");
+    const showSignupLink = document.getElementById("show-signup");
+    const showLoginLink = document.getElementById("show-login");
+
     editor.onLocalEdit = (op) => {
         otClient.localEdit(op);
     };
@@ -57,6 +74,7 @@ document.addEventListener("DOMContentLoaded", () => {
         statusEl.className = `status ${status}`;
         statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
     };
+
     function updateRevisionDisplay(rev) {
         revisionDisplay.textContent = `Rev: ${rev}`;
     }
@@ -92,5 +110,75 @@ document.addEventListener("DOMContentLoaded", () => {
             delete activeCursors[clientId];
         }
     }
-    ws.connect();
+
+    function showEditorScreen() {
+        authScreen.classList.add("hidden");
+        header.classList.remove("hidden");
+        editorContainer.classList.remove("hidden");
+        footer.classList.remove("hidden");
+        currentUsernameDisplay.textContent = auth.username;
+        ws.connect();
+    }
+    function showAuthScreen() {
+        authScreen.classList.remove("hidden");
+        header.classList.add("hidden");
+        editorContainer.classList.add("hidden");
+        footer.classList.add("hidden");
+    }
+
+    loginForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        loginError.textContent = "";
+        const username = document.getElementById("login-username").value;
+        const password = document.getElementById("login-password").value;
+        try {
+            await auth.login(username, password);
+            showEditorScreen();
+        } catch (err) {
+            loginError.textContent = err.message;
+        }
+    });
+
+    signupForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        signupError.textContent = "";
+        const username = document.getElementById("signup-username").value;
+        const password = document.getElementById("signup-password").value;
+        try {
+            await auth.signup(username, password);
+            showEditorScreen();
+        } catch (err) {
+            signupError.textContent = err.message;
+        }
+    });
+
+    showSignupLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        loginForm.classList.add("hidden");
+        signupForm.classList.remove("hidden");
+        showSignupLink.classList.add("hidden");
+        showLoginLink.classList.remove("hidden");
+    });
+    showLoginLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        signupForm.classList.add("hidden");
+        loginForm.classList.remove("hidden");
+        showLoginLink.classList.add("hidden");
+        showSignupLink.classList.remove("hidden");
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+        if (ws.ws) ws.ws.close();
+        await auth.logout();
+        showAuthScreen();
+    });
+
+    (async () => {
+        const resumed = await auth.tryResumeSession();
+        if (resumed) {
+            showEditorScreen();
+        } else {
+            showAuthScreen();
+        }
+    })();
 });

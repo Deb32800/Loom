@@ -42,7 +42,7 @@ MESSAGE TYPES (our protocol):
 """
 from __future__ import annotations
 import logging
-import uuid
+import secrets
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
@@ -51,12 +51,15 @@ from server.ot_engine import Insert, Delete, NoOp
 from server.document import Document, OperationEntry
 from server.session_manager import SessionManager
 from server.database import Database
+from server.auth import auth_router, consume_ws_ticket
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger('loom.server')
 app = FastAPI(title='Loom', description='Real-time collaborative document editor')
+app.include_router(auth_router)
 document = Document(content='', document_id='main')
 session_manager = SessionManager()
 db = Database()
+app.state.db = db
 
 # Background task for batching DB writes
 db_flush_task = None
@@ -153,21 +156,31 @@ def serialize_operation(op) -> dict:
         raise ValueError(f'Cannot serialize operation: {type(op)}')
 
 @app.websocket('/ws')
-async def websocket_endpoint(websocket: WebSocket, client_id: str=Query(default=None)):
+async def websocket_endpoint(websocket: WebSocket, ticket: str=Query(...)):
     """The main collaboration WebSocket endpoint.
-    
+
     Each browser tab opens one WebSocket connection to this endpoint.
     The connection stays open for the entire editing session.
-    
+
     Flow:
-        1. Client connects with ?client_id=xxx
+        1. Client fetches a single-use ticket from POST /api/auth/ws-ticket
+           (authenticated via a normal JWT bearer token) and connects with
+           ?ticket=xxx — browsers can't set custom headers on a WS handshake,
+           and a long-lived JWT in the query string would end up in access
+           logs, so a short-lived one-time ticket stands in for it.
         2. Server sends current doc state
         3. Server notifies others of the new user
         4. Loop: receive messages, process them, broadcast results
         5. On disconnect: clean up and notify others
     """
-    if not client_id:
-        client_id = f'user_{uuid.uuid4().hex[:8]}'
+    ticket_info = consume_ws_ticket(ticket)
+    if ticket_info is None:
+        await websocket.close(code=4401)
+        return
+    # Suffix so the same user connecting from multiple tabs gets distinct
+    # session identities instead of silently stomping on each other in
+    # session_manager's client_id-keyed dict.
+    client_id = f'{ticket_info.username}-{secrets.token_hex(3)}'
     client = await session_manager.connect(client_id, websocket)
     logger.info(f'New connection: {client_id}')
     try:

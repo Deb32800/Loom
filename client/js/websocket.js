@@ -1,32 +1,42 @@
 class LoomWebSocket {
-    constructor() {
+    // ticketProvider: async () => ticket string. Called on every connect AND
+    // every reconnect, since WS tickets are single-use — a raw ticket can't
+    // just be stashed and replayed the way a client-chosen id used to be.
+    constructor(ticketProvider) {
+        this.ticketProvider = ticketProvider;
         this.ws = null;
-        this.clientId = null;
         this.isConnected = false;
         this._reconnectAttempts = 0;
-        this._maxReconnectDelay = 30000; 
-        this._baseDelay = 1000;          
+        this._maxReconnectDelay = 30000;
+        this._baseDelay = 1000;
         this._reconnectTimer = null;
-        this.onSync = null;          
-        this.onAck = null;           
-        this.onRemoteOp = null;      
-        this.onCursor = null;        
-        this.onPresence = null;      
-        this.onStatusChange = null;  
-        this.onError = null;         
+        this.onSync = null;
+        this.onAck = null;
+        this.onRemoteOp = null;
+        this.onCursor = null;
+        this.onPresence = null;
+        this.onStatusChange = null;
+        this.onError = null;
     }
-    connect(clientId) {
-        this.clientId = clientId || "user_" + Math.random().toString(36).substr(2, 8);
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const url = `${protocol}//${window.location.host}/ws?client_id=${this.clientId}`;
+    async connect() {
         this._updateStatus("connecting");
+        let ticket;
+        try {
+            ticket = await this.ticketProvider();
+        } catch (e) {
+            console.error("[WS] Failed to obtain a connection ticket:", e);
+            this._scheduleReconnect();
+            return;
+        }
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const url = `${protocol}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`;
         try {
             this.ws = new WebSocket(url);
             this.ws.onopen = () => {
                 this.isConnected = true;
                 this._reconnectAttempts = 0;
                 this._updateStatus("connected");
-                console.log("[WS] Connected as", this.clientId);
+                console.log("[WS] Connected");
             };
             this.ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
@@ -56,14 +66,12 @@ class LoomWebSocket {
             type: "operation",
             op: op,
             revision: revision,
-            client_id: this.clientId
         });
     }
     sendCursor(position) {
         this.send({
             type: "cursor",
             position: position,
-            client_id: this.clientId
         });
     }
     _handleMessage(data) {
@@ -97,7 +105,7 @@ class LoomWebSocket {
         }
     }
     _scheduleReconnect() {
-        if (this._reconnectTimer) return; 
+        if (this._reconnectTimer) return;
         const delay = Math.min(
             this._baseDelay * Math.pow(2, this._reconnectAttempts),
             this._maxReconnectDelay
@@ -106,7 +114,7 @@ class LoomWebSocket {
         console.log(`[WS] Reconnecting in ${delay / 1000}s (attempt ${this._reconnectAttempts})`);
         this._reconnectTimer = setTimeout(() => {
             this._reconnectTimer = null;
-            this.connect(this.clientId);
+            this.connect();
         }, delay);
     }
 }

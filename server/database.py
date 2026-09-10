@@ -34,6 +34,13 @@ class Database:
         self._engine: Optional[AsyncEngine] = None
         self._session_factory: Optional[async_sessionmaker] = None
 
+    @property
+    def session_factory(self) -> async_sessionmaker:
+        """Public accessor so other modules (e.g. server/auth.py) can open their
+        own sessions for tables this class doesn't itself manage, without
+        reaching into a private attribute."""
+        return self._session_factory
+
     async def initialize(self) -> None:
         """Open the database engine and create tables if needed.
 
