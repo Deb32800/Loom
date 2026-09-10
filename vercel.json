@@ -1,5 +1,0 @@
-{
-  "version": 2,
-  "buildCommand": "mkdir -p dist && cp -r client/* dist/",
-  "outputDirectory": "dist"
-}
