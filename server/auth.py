@@ -10,12 +10,14 @@ Loom Auth — JWT-based authentication
 - Single-use, short-TTL WebSocket "tickets": browsers can't set custom headers
   on a WS handshake, and a long-lived JWT in the query string would end up in
   server access logs, so a client fetches a one-time ticket over authenticated
-  REST immediately before opening the socket. Tickets live in an in-memory
-  dict for now (single process) — a later phase moves this store to Redis so
-  it keeps working once there's more than one app instance.
+  REST immediately before opening the socket. Tickets live in Redis (SETEX'd
+  with the ticket's TTL, consumed atomically via GETDEL) so a client can
+  fetch a ticket from one app instance and connect to a different one —
+  required once there's more than one instance behind a load balancer.
 """
 from __future__ import annotations
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -23,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
+import redis.asyncio as redis
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
@@ -114,37 +117,44 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
 # ---------------------------------------------------------------------------
 
 class _TicketInfo:
-    __slots__ = ('user_id', 'username', 'document_id', 'role', 'title', 'expires_at')
+    __slots__ = ('user_id', 'username', 'document_id', 'role', 'title')
 
-    def __init__(self, user_id: str, username: str, document_id: str, role: str, title: str, expires_at: datetime):
+    def __init__(self, user_id: str, username: str, document_id: str, role: str, title: str):
         self.user_id = user_id
         self.username = username
         self.document_id = document_id
         self.role = role
         self.title = title
-        self.expires_at = expires_at
 
 
-_ws_tickets: dict = {}
+def _ticket_key(ticket: str) -> str:
+    return f'ws-ticket:{ticket}'
 
 
-def issue_ws_ticket(user_id: str, username: str, document_id: str, role: str, title: str) -> str:
+async def issue_ws_ticket(redis_client: redis.Redis, user_id: str, username: str, document_id: str, role: str, title: str) -> str:
     """Issue a single-use ticket bound to one user, one document, and the
     role they're allowed to act with on it. The WS endpoint derives its
     document_id and permissions from this ticket rather than trusting
-    anything the client sends directly."""
+    anything the client sends directly.
+
+    Stored in Redis (not this process's memory) so a client can fetch the
+    ticket from whichever app instance handled their REST call and redeem it
+    against a different instance's WebSocket endpoint — required once
+    there's more than one instance behind a load balancer."""
     ticket = secrets.token_urlsafe(24)
-    _ws_tickets[ticket] = _TicketInfo(user_id, username, document_id, role, title, datetime.now(timezone.utc) + WS_TICKET_TTL)
+    payload = json.dumps({'user_id': user_id, 'username': username, 'document_id': document_id, 'role': role, 'title': title})
+    await redis_client.setex(_ticket_key(ticket), int(WS_TICKET_TTL.total_seconds()), payload)
     return ticket
 
 
-def consume_ws_ticket(ticket: str) -> Optional[_TicketInfo]:
-    info = _ws_tickets.pop(ticket, None)
-    if info is None:
+async def consume_ws_ticket(redis_client: redis.Redis, ticket: str) -> Optional[_TicketInfo]:
+    """Atomically fetch-and-delete a ticket (GETDEL) so it can never be
+    redeemed twice, even if two requests race to consume it concurrently."""
+    raw = await redis_client.getdel(_ticket_key(ticket))
+    if raw is None:
         return None
-    if info.expires_at < datetime.now(timezone.utc):
-        return None
-    return info
+    data = json.loads(raw)
+    return _TicketInfo(data['user_id'], data['username'], data['document_id'], data['role'], data['title'])
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +163,10 @@ def consume_ws_ticket(ticket: str) -> Optional[_TicketInfo]:
 
 async def get_db(request: Request) -> Database:
     return request.app.state.db
+
+
+async def get_redis(request: Request) -> redis.Redis:
+    return request.app.state.redis
 
 
 async def get_current_user(

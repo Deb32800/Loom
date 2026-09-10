@@ -49,6 +49,7 @@ from server.document import Document
 from server.document_registry import DocumentRegistry
 from server.session_manager import SessionManager
 from server.database import Database
+from server.redis_client import create_redis_client
 from server.auth import auth_router, consume_ws_ticket
 from server.documents import documents_router
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
@@ -59,9 +60,11 @@ app.include_router(documents_router)
 session_manager = SessionManager()
 db = Database()
 registry = DocumentRegistry(db)
+redis_client = create_redis_client()
 app.state.db = db
 app.state.registry = registry
 app.state.session_manager = session_manager
+app.state.redis = redis_client
 
 # Background task for batching DB writes
 db_flush_task = None
@@ -94,6 +97,8 @@ async def on_startup():
     """Called once when the server starts. Individual documents are loaded
     lazily on first connection (DocumentRegistry), not eagerly here."""
     await db.initialize()
+    await redis_client.ping()  # fail fast at startup if Redis is unreachable
+    logger.info('Redis connection established')
     global db_flush_task
     db_flush_task = asyncio.create_task(db_flush_loop())
 
@@ -110,6 +115,7 @@ async def on_shutdown():
 
     await registry.flush_all()
     await db.close()
+    await redis_client.aclose()
     logger.info('Server shutdown complete, all active documents saved')
 
 def parse_operation(op_data: dict):
@@ -173,7 +179,7 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str=Query(...)):
         4. Loop: receive messages, process them, broadcast results
         5. On disconnect: clean up and notify others
     """
-    ticket_info = consume_ws_ticket(ticket)
+    ticket_info = await consume_ws_ticket(redis_client, ticket)
     if ticket_info is None:
         await websocket.close(code=4401)
         return

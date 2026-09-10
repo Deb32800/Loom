@@ -12,11 +12,12 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
+import redis.asyncio as redis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from server.auth import WsTicketResponse, get_current_user, get_db, issue_ws_ticket
+from server.auth import WsTicketResponse, get_current_user, get_db, get_redis, issue_ws_ticket
 from server.database import Database
 from server.document_registry import DocumentRegistry
 from server.models import DocumentMemberModel, DocumentModel, UserModel
@@ -214,12 +215,17 @@ async def unshare_document(document_id: str, user_id: str, user: UserModel = Dep
 
 
 @documents_router.post('/{document_id}/ws-ticket', response_model=WsTicketResponse)
-async def document_ws_ticket(document_id: str, user: UserModel = Depends(get_current_user), db: Database = Depends(get_db)):
+async def document_ws_ticket(
+    document_id: str,
+    user: UserModel = Depends(get_current_user),
+    db: Database = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+):
     membership = _require_role(await _get_membership(db, document_id, user.id), ROLES)
     async with db.session_factory() as session:
         doc = await session.get(DocumentModel, document_id)
         if doc is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Document not found')
         title = doc.title
-    ticket = issue_ws_ticket(user.id, user.username, document_id, membership.role, title)
+    ticket = await issue_ws_ticket(redis_client, user.id, user.username, document_id, membership.role, title)
     return WsTicketResponse(ticket=ticket)
