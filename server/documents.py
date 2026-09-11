@@ -8,6 +8,7 @@ Access to a document — including opening its WebSocket — always goes through
 a `document_members` row; there is no implicit access.
 """
 from __future__ import annotations
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -21,7 +22,6 @@ from server.auth import WsTicketResponse, get_current_user, get_db, get_redis, i
 from server.database import Database
 from server.document_registry import DocumentRegistry
 from server.models import DocumentMemberModel, DocumentModel, UserModel
-from server.session_manager import SessionManager
 
 logger = logging.getLogger('loom.documents')
 
@@ -33,10 +33,6 @@ SHAREABLE_ROLES = ('editor', 'viewer')
 
 async def get_registry(request: Request) -> DocumentRegistry:
     return request.app.state.registry
-
-
-async def get_session_manager(request: Request) -> SessionManager:
-    return request.app.state.session_manager
 
 
 async def _get_membership(db: Database, document_id: str, user_id: str) -> Optional[DocumentMemberModel]:
@@ -156,7 +152,7 @@ async def delete_document(
     user: UserModel = Depends(get_current_user),
     db: Database = Depends(get_db),
     registry: DocumentRegistry = Depends(get_registry),
-    session_manager: SessionManager = Depends(get_session_manager),
+    redis_client: redis.Redis = Depends(get_redis),
 ):
     _require_role(await _get_membership(db, document_id, user.id), ('owner',))
     async with db.session_factory() as session:
@@ -169,11 +165,14 @@ async def delete_document(
         await session.delete(doc)
         await session.commit()
 
-    # If this document is currently loaded in memory (clients connected),
-    # evict it without flushing — the rows are gone, so a flush would just
-    # recreate a broken, ownerless row — and tell any connected clients.
-    registry.evict(document_id)
-    await session_manager.broadcast(document_id, {'type': 'document_deleted'})
+    # If this document is currently loaded in memory on THIS instance
+    # (which also releases the ownership lock + doc-ops subscription, via
+    # DocumentRegistry's on_evict callback — see main.py), evict it without
+    # flushing: the rows are gone, so a flush would just recreate a broken,
+    # ownerless row. Publish over Redis (not a local-only broadcast) so
+    # connected clients on *any* instance hear about it, not just this one.
+    await registry.evict(document_id)
+    await redis_client.publish(f'doc-control:{document_id}', json.dumps({'type': 'document_deleted'}))
     return None
 
 

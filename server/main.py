@@ -5,6 +5,8 @@ Loom Server — The Main FastAPI Application
 This is where everything connects:
     - OT Engine (transform operations)
     - DocumentRegistry (load/cache/evict per-document state)
+    - DocumentOwnership (single-writer-per-document Redis lock)
+    - RedisFanout (cross-instance ops-forwarding + broadcast + presence)
     - Session Manager (track connected clients, scoped per document)
     - WebSocket endpoint (receive and broadcast operations)
     - Auth + Documents REST routers (server/auth.py, server/documents.py)
@@ -17,11 +19,19 @@ WHAT HAPPENS WHEN A CLIENT CONNECTS:
     3. Server validates + consumes the ticket, deriving document_id, the
        caller's identity, and their role (owner/editor/viewer) from it —
        never from anything the client claims directly
-    4. Server loads the document (DocumentRegistry, cached after first load)
-       and sends its current state (sync message)
+    4. This instance tries to become (or confirms it already is) the
+       document's owner via a Redis lock. If it is, it loads the document
+       (DocumentRegistry) and that's its sync baseline. If some other
+       instance already owns it, this instance reads the owner's live
+       state from a Redis-cached snapshot instead — it never loads its own
+       Document object for a document it doesn't own.
     5. Server tells everyone else on that document that a new user joined
     6. Client starts sending operations as the user types (rejected
-       server-side if their role is 'viewer')
+       server-side if their role is 'viewer'). If this instance owns the
+       document, it processes the operation directly; if not, it forwards
+       it to the owner over Redis and the owner's result comes back
+       through the same broadcast channel this instance is already
+       subscribed to.
 
 MESSAGE TYPES (our protocol):
     Client -> Server:
@@ -44,9 +54,11 @@ import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from server.ot_engine import Insert, Delete, NoOp
-from server.document import Document
+from server.ot_engine import NoOp
+from server.wire_format import parse_operation, serialize_operation
 from server.document_registry import DocumentRegistry
+from server.document_ownership import DocumentOwnership
+from server.fanout import RedisFanout
 from server.session_manager import SessionManager
 from server.database import Database
 from server.redis_client import create_redis_client
@@ -57,18 +69,85 @@ logger = logging.getLogger('loom.server')
 app = FastAPI(title='Loom', description='Real-time collaborative document editor')
 app.include_router(auth_router)
 app.include_router(documents_router)
+
 session_manager = SessionManager()
 db = Database()
-registry = DocumentRegistry(db)
 redis_client = create_redis_client()
+
+async def _on_ownership_lost(document_id: str) -> None:
+    """DocumentOwnership calls this when a lease is lost involuntarily (the
+    renew loop couldn't renew it in time, e.g. a GC pause) rather than via
+    an explicit release(). Stop listening for forwarded ops we're no longer
+    eligible to process — same cleanup _on_document_evicted does for the
+    voluntary path below, just triggered from the other direction."""
+    await fanout.release_ops_subscription(document_id)
+
+ownership = DocumentOwnership(redis_client, on_lost=_on_ownership_lost)
+
+async def _on_document_evicted(document_id: str) -> None:
+    """DocumentRegistry calls this when a document leaves memory (grace
+    period elapsed, or an explicit evict on delete). We were only ever
+    eligible to have it loaded if we owned it, so give up that lock too —
+    and stop listening for forwarded ops nobody will process anymore."""
+    await ownership.release(document_id)
+    await fanout.release_ops_subscription(document_id)
+
+registry = DocumentRegistry(db, on_evict=_on_document_evicted)
+
+pending_db_ops = []
+
+async def _process_and_publish(document_id: str, client_id: str, op, client_revision: int) -> None:
+    """Apply an operation to a document THIS instance owns — whether it
+    came from one of our own local clients or was forwarded to us by
+    another instance over doc-ops — and publish the result. Every instance
+    with local clients on this document (including us) relays that
+    publish as an 'ack' to the sender or an 'operation' broadcast to
+    everyone else, via RedisFanout's doc-broadcast subscription."""
+    document = registry.get_active(document_id)
+    if document is None:
+        await session_manager.send_to(document_id, client_id, {'type': 'error', 'message': 'Document not currently loaded'})
+        return
+    try:
+        result = document.receive_operation(op=op, client_revision=client_revision, client_id=client_id)
+    except ValueError as e:
+        await session_manager.send_to(document_id, client_id, {'type': 'error', 'message': str(e)})
+        return
+    if result is None:
+        # The op fully resolved to a no-op after transform — just ack the
+        # sender at the current revision, nothing to broadcast to anyone else.
+        await fanout.publish_broadcast(document_id, serialize_operation(NoOp()), document.revision, client_id, noop=True)
+        return
+    await fanout.set_cached_state(document_id, document.content, document.revision)
+    await fanout.publish_broadcast(document_id, serialize_operation(result.op), result.revision, client_id, noop=False)
+    pending_db_ops.append((document_id, result.op, result.revision, client_id))
+    logger.info(f'Op from {client_id} on {document_id}: {serialize_operation(result.op)} -> rev {result.revision}')
+
+async def _on_forwarded_operation(document_id: str, data: dict) -> None:
+    """Called when a doc-ops message arrives — only instances currently
+    subscribed (i.e. the owner) ever receive these."""
+    if not ownership.is_owner(document_id):
+        # Rare race: message was in flight as we released ownership. Drop
+        # it rather than process it incorrectly — see fanout.py's docstring
+        # for why this narrow gap is an accepted scope boundary, not a bug.
+        return
+    try:
+        op = parse_operation(data['op'])
+    except (ValueError, KeyError) as e:
+        logger.error(f'Bad forwarded operation for {document_id}: {e}')
+        return
+    await _process_and_publish(document_id, data['client_id'], op, data['revision'])
+
+fanout = RedisFanout(redis_client, session_manager, on_forwarded_operation=_on_forwarded_operation)
+
 app.state.db = db
 app.state.registry = registry
 app.state.session_manager = session_manager
 app.state.redis = redis_client
+app.state.ownership = ownership
+app.state.fanout = fanout
 
 # Background task for batching DB writes
 db_flush_task = None
-pending_db_ops = []
 
 async def db_flush_loop():
     """Periodically flush operations and touched documents' state to the database."""
@@ -99,13 +178,16 @@ async def on_startup():
     await db.initialize()
     await redis_client.ping()  # fail fast at startup if Redis is unreachable
     logger.info('Redis connection established')
+    await fanout.start()
     global db_flush_task
     db_flush_task = asyncio.create_task(db_flush_loop())
 
 @app.on_event('shutdown')
 async def on_shutdown():
-    """Called once when the server stops. Flushes every active document and
-    closes the database."""
+    """Called once when the server stops. Flushes every active document,
+    releases every ownership lock this instance held (so another instance
+    can take over immediately instead of waiting out the lease TTL), and
+    closes the database/Redis connections."""
     if db_flush_task:
         db_flush_task.cancel()
 
@@ -114,48 +196,11 @@ async def on_shutdown():
             await db.save_operation(*op_args)
 
     await registry.flush_all()
+    await ownership.release_all()
+    await fanout.stop()
     await db.close()
     await redis_client.aclose()
     logger.info('Server shutdown complete, all active documents saved')
-
-def parse_operation(op_data: dict):
-    """Convert a JSON operation dict into an Insert or Delete object.
-
-    Expected format:
-        {"type": "insert", "position": 5, "text": "hello"}
-        {"type": "delete", "position": 5, "count": 3}
-
-    Args:
-        op_data: Dictionary from the client's JSON message.
-
-    Returns:
-        An Insert or Delete operation.
-
-    Raises:
-        ValueError: If the operation format is invalid.
-    """
-    op_type = op_data.get('type')
-    if op_type == 'insert':
-        return Insert(position=op_data['position'], text=op_data['text'])
-    elif op_type == 'delete':
-        return Delete(position=op_data['position'], count=op_data['count'])
-    else:
-        raise ValueError(f'Unknown operation type: {op_type}')
-
-def serialize_operation(op) -> dict:
-    """Convert an Insert/Delete/NoOp into a JSON-serializable dict.
-
-    This is the reverse of parse_operation. We need this to send
-    operations back to clients over WebSocket.
-    """
-    if isinstance(op, Insert):
-        return {'type': 'insert', 'position': op.position, 'text': op.text}
-    elif isinstance(op, Delete):
-        return {'type': 'delete', 'position': op.position, 'count': op.count}
-    elif isinstance(op, NoOp):
-        return {'type': 'noop'}
-    else:
-        raise ValueError(f'Cannot serialize operation: {type(op)}')
 
 @app.websocket('/ws')
 async def websocket_endpoint(websocket: WebSocket, ticket: str=Query(...)):
@@ -173,10 +218,12 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str=Query(...)):
            long-lived JWT in the query string would end up in access logs,
            so a short-lived one-time ticket stands in for it. The ticket
            carries document_id, the caller's identity, and their role.
-        2. Server loads the document (DocumentRegistry) and sends its
-           current state (sync message)
+        2. This instance tries to become the document's owner (or confirms
+           it already is). Owner: loads the document via DocumentRegistry.
+           Non-owner: reads the owner's live state from Redis instead.
         3. Server notifies others on the same document of the new user
-        4. Loop: receive messages, process them, broadcast results
+        4. Loop: receive messages, process them (directly if we own the
+           document, forwarded to the owner over Redis if not)
         5. On disconnect: clean up and notify others
     """
     ticket_info = await consume_ws_ticket(redis_client, ticket)
@@ -185,60 +232,82 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str=Query(...)):
         return
     document_id = ticket_info.document_id
     role = ticket_info.role
-    try:
-        document = await registry.acquire(document_id)
-    except KeyError:
-        await websocket.close(code=4404)
-        return
+
+    is_owner = await ownership.try_acquire(document_id)
+    if is_owner:
+        try:
+            document = await registry.acquire(document_id)
+        except KeyError:
+            await ownership.release(document_id)
+            await websocket.close(code=4404)
+            return
+        await fanout.set_cached_state(document_id, document.content, document.revision)
+        await fanout.ensure_ops_subscription(document_id)
+        sync_content, sync_revision = document.content, document.revision
+    else:
+        cached = await fanout.get_cached_state(document_id)
+        if cached is not None:
+            sync_content, sync_revision = cached
+        else:
+            saved = await db.load_document(document_id)
+            if saved is None:
+                await websocket.close(code=4404)
+                return
+            sync_content, sync_revision = saved
+
+    await fanout.ensure_document_subscription(document_id)
 
     # Suffix so the same user connecting from multiple tabs gets distinct
     # session identities instead of silently stomping on each other in
     # session_manager's client_id-keyed dict.
     client_id = f'{ticket_info.username}-{secrets.token_hex(3)}'
     client = await session_manager.connect(document_id, client_id, websocket, role)
-    logger.info(f'New connection: {client_id} -> document {document_id} ({role})')
+    logger.info(f"New connection: {client_id} -> document {document_id} ({role}, {'owner' if is_owner else 'follower'} instance)")
     try:
-        await session_manager.send_to(document_id, client_id, {'type': 'sync', 'content': document.content, 'revision': document.revision, 'document_id': document_id, 'title': ticket_info.title, 'clients': session_manager.get_client_list(document_id), 'your_client_id': client_id, 'your_color': client.color, 'your_role': role})
-        await session_manager.broadcast(document_id, {'type': 'presence', 'client_id': client_id, 'action': 'join', 'color': client.color}, exclude_client=client_id)
+        await session_manager.send_to(document_id, client_id, {'type': 'sync', 'content': sync_content, 'revision': sync_revision, 'document_id': document_id, 'title': ticket_info.title, 'clients': session_manager.get_client_list(document_id), 'your_client_id': client_id, 'your_color': client.color, 'your_role': role})
+        await fanout.publish_control(document_id, {'type': 'presence', 'client_id': client_id, 'action': 'join', 'color': client.color})
         while True:
             data = await websocket.receive_json()
-            await _handle_message(document, document_id, client_id, role, data)
+            await _handle_message(document_id, client_id, role, data)
     except WebSocketDisconnect:
         logger.info(f'Client disconnected: {client_id}')
     except Exception as e:
         logger.error(f'Error with client {client_id}: {e}')
     finally:
         session_manager.disconnect(document_id, client_id)
-        registry.release(document_id)
-        await session_manager.broadcast(document_id, {'type': 'presence', 'client_id': client_id, 'action': 'leave'})
+        await fanout.release_document_subscription(document_id)
+        if is_owner:
+            registry.release(document_id)
+        await fanout.publish_control(document_id, {'type': 'presence', 'client_id': client_id, 'action': 'leave'})
 
-async def _handle_message(document: Document, document_id: str, client_id: str, role: str, data: dict) -> None:
+async def _handle_message(document_id: str, client_id: str, role: str, data: dict) -> None:
     """Route an incoming WebSocket message to the appropriate handler.
 
     Args:
-        document:    The document this connection is scoped to.
-        document_id: That document's id.
+        document_id: The document this connection is scoped to.
         client_id:   Which client sent this message.
         role:        The sender's role on this document.
         data:        The parsed JSON message.
     """
     msg_type = data.get('type')
     if msg_type == 'operation':
-        await _handle_operation(document, document_id, client_id, role, data)
+        await _handle_operation(document_id, client_id, role, data)
     elif msg_type == 'cursor':
         await _handle_cursor(document_id, client_id, data)
     else:
         logger.warning(f'Unknown message type from {client_id}: {msg_type}')
 
-async def _handle_operation(document: Document, document_id: str, client_id: str, role: str, data: dict) -> None:
+async def _handle_operation(document_id: str, client_id: str, role: str, data: dict) -> None:
     """Process an incoming operation from a client.
 
-    This is the core of the collaboration flow:
     1. Reject if the sender is a read-only viewer
     2. Parse the operation from JSON
-    3. Pass to document.receive_operation() (which transforms if needed)
-    4. Send 'ack' to the sender
-    5. Broadcast the (possibly transformed) operation to everyone else
+    3. If this instance owns the document, process it directly
+       (document.receive_operation transforms if needed) and publish the
+       result. If not, forward it to whichever instance does — their
+       result reaches us (and gets relayed to this client) through the
+       same doc-broadcast subscription every instance with local clients
+       on this document maintains.
     """
     if role == 'viewer':
         await session_manager.send_to(document_id, client_id, {'type': 'error', 'message': 'You have read-only access to this document'})
@@ -246,27 +315,23 @@ async def _handle_operation(document: Document, document_id: str, client_id: str
     try:
         op = parse_operation(data['op'])
         client_revision = data['revision']
-        result = document.receive_operation(op=op, client_revision=client_revision, client_id=client_id)
-        if result is None:
-            await session_manager.send_to(document_id, client_id, {'type': 'ack', 'revision': document.revision})
-            return
-        await session_manager.send_to(document_id, client_id, {'type': 'ack', 'revision': result.revision})
-        await session_manager.broadcast(document_id, {'type': 'operation', 'op': serialize_operation(result.op), 'revision': result.revision, 'client_id': client_id}, exclude_client=client_id)
-
-        # Batch DB saves
-        pending_db_ops.append((document_id, result.op, result.revision, client_id))
-
-        logger.info(f'Op from {client_id} on {document_id}: {serialize_operation(result.op)} -> rev {result.revision}')
     except (ValueError, KeyError) as e:
         logger.error(f'Invalid operation from {client_id}: {e}')
         await session_manager.send_to(document_id, client_id, {'type': 'error', 'message': str(e)})
+        return
+
+    if ownership.is_owner(document_id):
+        await _process_and_publish(document_id, client_id, op, client_revision)
+    else:
+        await fanout.forward_operation(document_id, data['op'], client_revision, client_id)
 
 async def _handle_cursor(document_id: str, client_id: str, data: dict) -> None:
     """Process a cursor position update from a client.
 
-    When a user moves their cursor (clicks, arrow keys, etc.),
-    the client sends the new position. We broadcast it to everyone
-    else on the same document so they can show a colored cursor there.
+    Cursor position is intentionally local-only (not fanned out across
+    instances, unlike operations/ownership/presence) — see fanout.py's
+    docstring for why: frequent, cosmetic, and doesn't affect document
+    correctness, so it's not worth the steady cross-instance Redis traffic.
     """
     position = data.get('position', 0)
     session_manager.update_cursor(document_id, client_id, position)

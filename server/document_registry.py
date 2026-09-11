@@ -10,7 +10,7 @@ reload cost, but an abandoned document doesn't sit in memory forever.
 from __future__ import annotations
 import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Awaitable, Callable, Dict, Optional
 
 from server.database import Database
 from server.document import Document, OperationEntry
@@ -28,10 +28,16 @@ class _ActiveDocument:
 
 
 class DocumentRegistry:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, on_evict: Optional[Callable[[str], Awaitable[None]]] = None):
         self._db = db
         self._active: Dict[str, _ActiveDocument] = {}
         self._load_locks: Dict[str, asyncio.Lock] = {}
+        # Called (if set) whenever a document leaves memory — either via the
+        # grace-period eviction below or an explicit evict() — so a caller
+        # coordinating cross-instance state (e.g. releasing a Redis
+        # ownership lock) finds out without DocumentRegistry needing to know
+        # anything about Redis itself.
+        self._on_evict = on_evict
 
     def _load_lock(self, document_id: str) -> asyncio.Lock:
         lock = self._load_locks.get(document_id)
@@ -76,7 +82,7 @@ class DocumentRegistry:
         active = self._active.get(document_id)
         return active.document if active else None
 
-    def evict(self, document_id: str) -> None:
+    async def evict(self, document_id: str) -> None:
         """Immediately drop a document from memory without flushing it —
         for when the caller has already deleted its rows from the database
         (e.g. DELETE /api/documents/{id}) and a flush would just recreate a
@@ -85,6 +91,8 @@ class DocumentRegistry:
         if active is not None and active.eviction_task is not None:
             active.eviction_task.cancel()
         self._load_locks.pop(document_id, None)
+        if self._on_evict is not None:
+            await self._on_evict(document_id)
 
     async def _load(self, document_id: str) -> _ActiveDocument:
         saved = await self._db.load_document(document_id)
@@ -111,6 +119,8 @@ class DocumentRegistry:
         del self._active[document_id]
         self._load_locks.pop(document_id, None)
         logger.info(f'Evicted document {document_id} from memory (grace period elapsed)')
+        if self._on_evict is not None:
+            await self._on_evict(document_id)
 
     async def flush_all(self) -> None:
         """Flush every active document's current state to the database. Used

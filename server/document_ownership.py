@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import redis.asyncio as redis
 
@@ -51,11 +51,17 @@ end
 
 
 class DocumentOwnership:
-    def __init__(self, redis_client: redis.Redis, instance_id: Optional[str] = None):
+    def __init__(self, redis_client: redis.Redis, instance_id: Optional[str] = None, on_lost: Optional[Callable[[str], Awaitable[None]]] = None):
         self._redis = redis_client
         self.instance_id = instance_id or str(uuid.uuid4())
         self._owned = set()
         self._renew_task: Optional[asyncio.Task] = None
+        # Called (if set) when a lease is lost involuntarily — i.e. via the
+        # renew loop below, not an explicit release() — so a caller holding
+        # onto owner-only state elsewhere (e.g. RedisFanout's doc-ops
+        # subscription) can drop it too instead of leaking a subscription
+        # that will only ever see messages it has to ignore.
+        self._on_lost = on_lost
 
     def _lock_key(self, document_id: str) -> str:
         return f'doc-lock:{document_id}'
@@ -123,3 +129,5 @@ class DocumentOwnership:
                     # see this and fail over accordingly.
                     logger.warning(f'Lost ownership of {document_id} (lease expired before renewal)')
                     self._owned.discard(document_id)
+                    if self._on_lost is not None:
+                        await self._on_lost(document_id)
