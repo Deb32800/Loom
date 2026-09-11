@@ -103,6 +103,15 @@ python -m server.main
 On first run, tables are created automatically (`Database.initialize()`);
 for schema changes going forward, use Alembic (`alembic upgrade head`).
 
+### Deploying it live
+
+This repo is set up for a free-tier deploy on Render (backend, via
+`Dockerfile` + `render.yaml`), with PostgreSQL on Neon and Redis on
+Upstash — no credit card needed on any of the three. Render's Blueprint
+feature picks up `render.yaml` automatically once you point a new
+Blueprint at this repo; it asks for `DATABASE_URL` and `REDIS_URL`
+(`JWT_SECRET` is auto-generated).
+
 ### 5. Access the Editor
 Open a web browser and navigate to:
 ```
