@@ -3,6 +3,7 @@ services:
     name: loom
     env: docker
     plan: free
+    region: singapore
     dockerfilePath: ./Dockerfile
     healthCheckPath: /
     envVars:
