@@ -59,6 +59,14 @@ class RedisFanout:
         self._ops_subscribed: set = set()   # document_ids we're subscribed to doc-ops for (i.e. we're owner)
 
     async def start(self) -> None:
+        # redis-py's PubSub.listen() is `while self.subscribed: ...` — if it
+        # starts before anything has ever been subscribed (true here: real
+        # per-document subscriptions only happen later, as WebSocket clients
+        # connect), the loop body never runs once and the generator exits
+        # immediately, silently ending this task for good. Subscribing to a
+        # permanent, never-unsubscribed channel first keeps `subscribed`
+        # True for the task's entire lifetime and avoids that startup race.
+        await self._pubsub.subscribe('fanout-keepalive')
         self._listen_task = asyncio.create_task(self._listen_loop())
 
     async def stop(self) -> None:
