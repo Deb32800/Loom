@@ -15,6 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const docTitleDisplay = document.getElementById("doc-title");
     let activeCursors = {};
 
+    const loadingScreen = document.getElementById("loading-screen");
     const authScreen = document.getElementById("auth-screen");
     const dashboardScreen = document.getElementById("dashboard-screen");
     const header = document.getElementById("header");
@@ -152,6 +153,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // ---- Screen routing -----------------------------------------------
 
     function hideAllScreens() {
+        loadingScreen.classList.add("hidden");
         authScreen.classList.add("hidden");
         dashboardScreen.classList.add("hidden");
         header.classList.add("hidden");

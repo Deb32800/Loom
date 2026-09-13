@@ -63,7 +63,10 @@ class ClientResult:
 async def _run_client(base_url: str, token: str, document_id: str, client_index: int, ops: int) -> ClientResult:
     result = ClientResult()
     try:
-        ticket = _http_json('POST', f'{base_url}/api/documents/{document_id}/ws-ticket', token=token)['ticket']
+        # _http_json uses blocking urllib — off the event loop, or N
+        # "concurrent" clients serialize their ticket fetches against each
+        # other and this script becomes its own bottleneck.
+        ticket = (await asyncio.to_thread(_http_json, 'POST', f'{base_url}/api/documents/{document_id}/ws-ticket', None, token))['ticket']
     except Exception as e:
         result.error = f'ticket fetch failed: {e}'
         return result

@@ -2,10 +2,10 @@ class OTClient {
     constructor() {
         this.state = "synchronized";
         this.pending = null;
-        this.buffer = null;
+        this.buffer = [];   // queue of not-yet-sent local ops, oldest first
         this.revision = 0;
-        this.onSendOperation = null;   
-        this.onApplyRemote = null;     
+        this.onSendOperation = null;
+        this.onApplyRemote = null;
     }
     localEdit(op) {
         switch (this.state) {
@@ -17,11 +17,15 @@ class OTClient {
                 }
                 break;
             case "awaitingConfirm":
-                this.buffer = op;
+                this.buffer.push(op);
                 this.state = "awaitingBuffer";
                 break;
             case "awaitingBuffer":
-                this.buffer = op;
+                // Queue it rather than overwrite: typing fast enough to stack
+                // up 3+ edits before the first ack returns is completely
+                // normal, and overwriting here used to silently drop every
+                // buffered edit but the last one from what reaches the server.
+                this.buffer.push(op);
                 break;
         }
     }
@@ -33,9 +37,10 @@ class OTClient {
                 this.state = "synchronized";
                 break;
             case "awaitingBuffer":
-                this.pending = this.buffer;
-                this.buffer = null;
-                this.state = "awaitingConfirm";
+                this.pending = this.buffer.shift();
+                // More still queued after this one -> stay in awaitingBuffer;
+                // otherwise this was the last of them -> back to awaitingConfirm.
+                this.state = this.buffer.length > 0 ? "awaitingBuffer" : "awaitingConfirm";
                 if (this.onSendOperation) {
                     this.onSendOperation(this.pending, this.revision);
                 }
@@ -63,14 +68,22 @@ class OTClient {
                 break;
             }
             case "awaitingBuffer": {
-                // Both `pending` (in flight) and `buffer` (queued locally) are concurrent
-                // with `op`. Transform `op` through pending first, then through buffer.
+                // `pending` (in flight) and every op still queued in `buffer` are all
+                // concurrent with `op`. Transform `op` through pending first, then
+                // through each queued op in turn, updating each of them to account
+                // for `op` along the way.
                 const [pendingPrime, opPrime1] = transform(this.pending, op);
-                const [bufferPrime, opPrime2] = transform(this.buffer, opPrime1);
                 this.pending = pendingPrime;
-                this.buffer = bufferPrime;
+                let opPrime = opPrime1;
+                const newBuffer = [];
+                for (const queuedOp of this.buffer) {
+                    const [queuedPrime, nextOpPrime] = transform(queuedOp, opPrime);
+                    newBuffer.push(queuedPrime);
+                    opPrime = nextOpPrime;
+                }
+                this.buffer = newBuffer;
                 if (this.onApplyRemote) {
-                    this.onApplyRemote(opPrime2);
+                    this.onApplyRemote(opPrime);
                 }
                 break;
             }
@@ -79,7 +92,7 @@ class OTClient {
     reset(revision) {
         this.state = "synchronized";
         this.pending = null;
-        this.buffer = null;
+        this.buffer = [];
         this.revision = revision;
     }
 }
