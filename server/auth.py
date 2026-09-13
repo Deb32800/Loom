@@ -44,6 +44,11 @@ ACCESS_TOKEN_TTL = timedelta(minutes=15)
 REFRESH_TOKEN_TTL = timedelta(days=30)
 WS_TICKET_TTL = timedelta(seconds=30)
 REFRESH_COOKIE_NAME = 'loom_refresh_token'
+# Render sets RENDER=true on every deployed instance, and every Render
+# service is served over HTTPS — so this is on in production and off for
+# local dev (http://localhost), where a Secure cookie wouldn't be sent at
+# all and would silently break the refresh flow.
+COOKIE_SECURE = bool(os.environ.get('RENDER'))
 
 _hasher = PasswordHasher()
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -107,7 +112,7 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         max_age=int(REFRESH_TOKEN_TTL.total_seconds()),
         httponly=True,
         samesite='lax',
-        secure=False,  # TODO: set True once served over HTTPS
+        secure=COOKIE_SECURE,
         path='/api/auth',
     )
 
