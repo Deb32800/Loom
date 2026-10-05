@@ -110,9 +110,8 @@ on first run; for schema changes after that, use `alembic upgrade head`.
 
 ## Performance: what actually happened when we measured it
 
-I didn't want a "trust me, it's fast" README, so here's what was actually
-tested, against the real live deployments, with the real Neon Postgres and
-Upstash Redis behind them — not a local mock of anything.
+Here's what was actually tested, against the real live deployments, with the real Neon Postgres and
+Upstash Redis behind them.
 
 ### The Azure-vs-Render lesson
 
